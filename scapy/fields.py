@@ -309,6 +309,27 @@ class _FieldContainer(object):
 
 AnyField = Union[Field[Any, Any], _FieldContainer]
 
+class HiddenField:
+    '''
+    Takes a field fld (like Emph does), and does not display it in pkt.show().
+    If defaultonly==True, it will show the field in pkt.show() only if it differs from the defined default value.
+    Useful for hidding reserved fields in packets, and generally decluttering output, without reducing functionality.
+    '''
+    fld = ""
+    def __init__(self, fld, defaultonly=False):
+        self.fld = fld
+        self.defaultonly = defaultonly
+    def to_show(self,pkt):
+        if (self.defaultonly == True) and (pkt.getfieldval(self.fld.name) != self.fld.default):
+            return True
+        return False
+    def __getattr__(self, attr):
+        return getattr(self.fld,attr)
+    def __hash__(self):
+        return hash(self.fld)
+    def __eq__(self, other):
+        return self.fld == other
+
 
 class Emph(_FieldContainer):
     """Empathize sub-layer for display"""
@@ -1858,10 +1879,7 @@ class StrLenFieldUtf16(StrLenField):
 
     def i2repr(self, pkt, x):
         # type: (Optional[Packet], bytes) -> str
-        try:
-            return plain_str(self.i2h(pkt, x))
-        except ValueError:
-            return plain_str(x) + " [invalid encoding]"
+        return plain_str(self.i2h(pkt, x))
 
     def i2h(self,
             pkt,  # type: Optional[Packet]
@@ -2011,38 +2029,24 @@ class FieldLenField(Field[int, int]):
 
 
 class StrNullField(StrField):
-    DELIMITER = b"\x00"
-    ALIGNMENT = 1
-
     def addfield(self, pkt, s, val):
         # type: (Packet, bytes, Optional[bytes]) -> bytes
-        return s + self.i2m(pkt, val) + self.DELIMITER
+        return s + self.i2m(pkt, val) + b"\x00"
 
     def getfield(self,
                  pkt,  # type: Packet
                  s,  # type: bytes
                  ):
         # type: (...) -> Tuple[bytes, bytes]
-        len_str = 0
-        while True:
-            len_str = s.find(self.DELIMITER, len_str)
-            if len_str < 0:
-                # DELIMITER not found: return empty
-                return b"", s
-            if len_str % self.ALIGNMENT:
-                len_str += 1
-            else:
-                break
-        return s[len_str + len(self.DELIMITER):], self.m2i(pkt, s[:len_str])
+        len_str = s.find(b"\x00")
+        if len_str < 0:
+            # \x00 not found: return empty
+            return b"", s
+        return s[len_str + 1:], self.m2i(pkt, s[:len_str])
 
     def randval(self):
         # type: () -> RandTermString
-        return RandTermString(RandNum(0, 1200), self.DELIMITER)
-
-
-class StrNullFieldUtf16(StrNullField, StrFieldUtf16):
-    DELIMITER = b"\x00\x00"
-    ALIGNMENT = 2
+        return RandTermString(RandNum(0, 1200), b"\x00")
 
 
 class StrStopField(StrField):
@@ -2059,6 +2063,7 @@ class StrStopField(StrField):
         len_str = s.find(self.stop)
         if len_str < 0:
             return b"", s
+#            raise Scapy_Exception,"StrStopField: stop value [%s] not found" %stop  # noqa: E501
         len_str += len(self.stop) + self.additional
         return s[len_str:], s[:len_str]
 
@@ -3198,7 +3203,7 @@ class IP6PrefixField(_IPPrefixFieldBase):
 
 class UTCTimeField(Field[float, int]):
     __slots__ = ["epoch", "delta", "strf",
-                 "use_msec", "use_micro", "use_nano", "custom_scaling"]
+                 "use_msec", "use_micro", "use_nano"]
 
     # Do not change the order of the keywords in here
     # Netflow heavily rely on this
@@ -3210,11 +3215,9 @@ class UTCTimeField(Field[float, int]):
                  use_nano=False,  # type: bool
                  epoch=None,  # type: Optional[Tuple[int, int, int, int, int, int, int, int, int]]  # noqa: E501
                  strf="%a, %d %b %Y %H:%M:%S %z",  # type: str
-                 custom_scaling=None,  # type: Optional[int]
-                 fmt="I"  # type: str
                  ):
         # type: (...) -> None
-        Field.__init__(self, name, default, fmt=fmt)
+        Field.__init__(self, name, default, "I")
         mk_epoch = EPOCH if epoch is None else calendar.timegm(epoch)
         self.epoch = mk_epoch
         self.delta = mk_epoch - EPOCH
@@ -3222,20 +3225,17 @@ class UTCTimeField(Field[float, int]):
         self.use_msec = use_msec
         self.use_micro = use_micro
         self.use_nano = use_nano
-        self.custom_scaling = custom_scaling
 
     def i2repr(self, pkt, x):
         # type: (Optional[Packet], float) -> str
         if x is None:
-            x = -self.delta
+            x = 0
         elif self.use_msec:
             x = x / 1e3
         elif self.use_micro:
             x = x / 1e6
         elif self.use_nano:
             x = x / 1e9
-        elif self.custom_scaling:
-            x = x / self.custom_scaling
         x = int(x) + self.delta
         t = time.strftime(self.strf, time.gmtime(x))
         return "%s (%d)" % (t, x)
